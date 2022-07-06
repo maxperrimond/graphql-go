@@ -23,7 +23,6 @@ type SubscribeParams struct {
 
 // Subscribe performs a subscribe operation on the given query and schema
 // To finish a subscription you can simply close the channel from inside the `Subscribe` function
-// currently does not support extensions hooks
 func Subscribe(p Params) chan *Result {
 
 	source := source.NewSource(&source.Source{
@@ -31,15 +30,46 @@ func Subscribe(p Params) chan *Result {
 		Name: "GraphQL request",
 	})
 
-	// TODO run extensions hooks
+	// run init on the extensions
+	extErrs := handleExtensionsInits(&p)
+	if len(extErrs) != 0 {
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
+		})
+	}
+
+	extErrs, parseFinishFn := handleExtensionsParseDidStart(&p)
+	if len(extErrs) != 0 {
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
+		})
+	}
 
 	// parse the source
 	AST, err := parser.Parse(parser.ParseParams{Source: source})
 	if err != nil {
+		// run parseFinishFuncs for extensions
+		extErrs = parseFinishFn(err)
 
 		// merge the errors from extensions and the original error from parser
 		return sendOneResultAndClose(&Result{
-			Errors: gqlerrors.FormatErrors(err),
+			Errors: extErrs,
+		})
+	}
+
+	// run parseFinish functions for extensions
+	extErrs = parseFinishFn(err)
+	if len(extErrs) != 0 {
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
+		})
+	}
+
+	// notify extensions about the start of the validation
+	extErrs, validationFinishFn := handleExtensionsValidationDidStart(&p)
+	if len(extErrs) != 0 {
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
 		})
 	}
 
@@ -48,11 +78,23 @@ func Subscribe(p Params) chan *Result {
 
 	if !validationResult.IsValid {
 		// run validation finish functions for extensions
-		return sendOneResultAndClose(&Result{
-			Errors: validationResult.Errors,
-		})
+		extErrs = validationFinishFn(validationResult.Errors)
 
+		// merge the errors from extensions and the original error from parser
+		extErrs = append(extErrs, validationResult.Errors...)
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
+		})
 	}
+
+	// run the validationFinishFuncs for extensions
+	extErrs = validationFinishFn(validationResult.Errors)
+	if len(extErrs) != 0 {
+		return sendOneResultAndClose(&Result{
+			Errors: extErrs,
+		})
+	}
+
 	return ExecuteSubscription(ExecuteParams{
 		Schema:        p.Schema,
 		Root:          p.RootObject,
@@ -71,7 +113,6 @@ func sendOneResultAndClose(res *Result) chan *Result {
 }
 
 // ExecuteSubscription is similar to graphql.Execute but returns a channel instead of a Result
-// currently does not support extensions
 func ExecuteSubscription(p ExecuteParams) chan *Result {
 
 	if p.Context == nil {
