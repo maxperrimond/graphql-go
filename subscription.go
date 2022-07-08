@@ -52,6 +52,7 @@ func Subscribe(p Params) chan *Result {
 		extErrs = parseFinishFn(err)
 
 		// merge the errors from extensions and the original error from parser
+		extErrs = append(extErrs, gqlerrors.FormatErrors(err)...)
 		return sendOneResultAndClose(&Result{
 			Errors: extErrs,
 		})
